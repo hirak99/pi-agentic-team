@@ -78,6 +78,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 		const live = await isLive(registration);
 		return {
 			...registration,
+			is_self: registration.agent_id === selfAgentId,
 			live,
 			effective_status: registration.status === "active" && !live ? "stale" : registration.status,
 		};
@@ -209,7 +210,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_list_agents",
 		label: "List team agents",
-		description: "List registered team agents and distinguish live, stale, inactive, and archived entries.",
+		description: "List registered team agents, explicitly mark this session's entry, and distinguish live, stale, inactive, and archived entries.",
 		promptSnippet: "Discover other registered team agents",
 		parameters: Type.Object({
 			include_inactive: Type.Optional(Type.Boolean()),
@@ -217,7 +218,11 @@ export default function teamExtension(pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params) {
 			const agents = await store.listAgents(params.include_inactive ?? false, params.include_archived ?? false);
-			return toolResult({ team_root: store.root, agents: await Promise.all(agents.map(withLiveness)) });
+			return toolResult({
+				team_root: store.root,
+				self_agent_id: selfAgentId ?? null,
+				agents: await Promise.all(agents.map(withLiveness)),
+			});
 		},
 	});
 
