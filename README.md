@@ -190,3 +190,7 @@ required.
 - No remote hosts or cross-machine transport
 - Registry and messages are trusted local files, not an authentication boundary
 - Agent messages do not grant additional permissions or deployment authority
+
+## License
+
+[Apache License 2.0](LICENSE)
