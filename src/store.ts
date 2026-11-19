@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, basename, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -48,7 +48,6 @@ async function readJson<T>(path: string): Promise<T> {
 }
 
 async function writeAtomic(path: string, content: string): Promise<void> {
-	const { mkdir } = await import("node:fs/promises");
 	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 	const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
 	try {
@@ -64,7 +63,6 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
 }
 
 async function withRegistryLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
-	const { mkdir } = await import("node:fs/promises");
 	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 	const lockPath = `${path}.lock`;
 	const started = Date.now();
@@ -178,6 +176,7 @@ export class TeamStore {
 				const existing = await readJson<AgentRegistration>(path);
 				if (existing.status === "deleted") throw new Error("deleted agents cannot be reactivated");
 				const now = new Date().toISOString();
+				const responsibilitiesChanged = duties !== existing.duties;
 				const registration: AgentRegistration = {
 					...existing,
 					instance_id: randomUUID(),
@@ -189,6 +188,10 @@ export class TeamStore {
 					status: "active",
 					transport: input.transport,
 					last_seen_at: now,
+					responsibilities_revision: (existing.responsibilities_revision ?? 1) + (responsibilitiesChanged ? 1 : 0),
+					responsibilities_updated_at: responsibilitiesChanged
+						? now
+						: (existing.responsibilities_updated_at ?? existing.registered_at),
 				};
 				delete registration.inactivated_at;
 				delete registration.deleted_at;
@@ -211,6 +214,8 @@ export class TeamStore {
 			transport: input.transport,
 			registered_at: now,
 			last_seen_at: now,
+			responsibilities_revision: 1,
+			responsibilities_updated_at: now,
 		};
 		await writeJsonAtomic(this.agentPath(agentId), registration);
 		return registration;
@@ -258,6 +263,23 @@ export class TeamStore {
 			};
 			await writeJsonAtomic(path, updated);
 			return true;
+		});
+	}
+
+	async updateResponsibilities(agentId: string, duties: string): Promise<AgentRegistration> {
+		const normalizedDuties = requireText(duties, "responsibilities", 20_000);
+		const path = this.agentPath(agentId);
+		return withRegistryLock(path, async () => {
+			const current = await readJson<AgentRegistration>(path);
+			const now = new Date().toISOString();
+			const updated: AgentRegistration = {
+				...current,
+				duties: normalizedDuties,
+				responsibilities_revision: (current.responsibilities_revision ?? 0) + 1,
+				responsibilities_updated_at: now,
+			};
+			await writeJsonAtomic(path, updated);
+			return updated;
 		});
 	}
 

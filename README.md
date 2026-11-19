@@ -10,7 +10,8 @@ only automatic wake-up transport; channel messages are read on demand.
 
 - Persistent team agent UUIDs, independent of Pi session IDs
 - Per-process instance UUIDs for safe lifecycle updates
-- `/register-team-agent` command and agent-initiated registration tool
+- `/team-agent-register` command and agent-initiated registration tool
+- `/team-agent-responsibilities` command for the current session
 - Self-UUID and full self-registration tools
 - Agent discovery with live/stale status
 - Safe member deletion by archival, preserving message history
@@ -50,7 +51,7 @@ agents on a team must use the same directory.
 As the human:
 
 ```text
-/register-team-agent Review repository changes and run the test suite.
+/team-agent-register Review repository changes and run the test suite.
 ```
 
 Or ask the current agent to register itself. It can call:
@@ -62,6 +63,18 @@ team_register(duties="...", name="optional-name")
 Registration captures the Pi session ID, CWD, process ID, and tmux pane when
 available. The registration identity is persisted in the Pi session, so a clean
 reload or resume restores the same team UUID with a fresh instance UUID.
+
+## Update current responsibilities
+
+```text
+/team-agent-responsibilities Review changes, run tests, and report regressions.
+```
+
+This updates the current registered session only. The registry stores a revision
+and update timestamp, and the command sends the revised responsibilities to the
+running agent as a user message or follow-up. Agents can inspect their own
+responsibilities with `team_get_self()` and other agents' responsibilities with
+`team_list_agents()`.
 
 A session outside tmux can still register and use files and channels, but direct
 messages to it return `wake_status: "unavailable"` until another transport is

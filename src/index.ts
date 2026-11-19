@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { TEAM_COMMANDS } from "./commands.ts";
 import { TeamStore } from "./store.ts";
 import { detectTmuxTransport, tmuxPaneExists, wakeTmuxAgent } from "./tmux.ts";
 import type { AgentRegistration, RegistrationInput, TeamMessage } from "./types.ts";
@@ -57,7 +58,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 
 	function requireSelf(): string {
 		if (!selfAgentId) {
-			throw new Error("this session is not registered; use team_register or /register-team-agent first");
+			throw new Error("this session is not registered; use team_register or /team-agent-register first");
 		}
 		return selfAgentId;
 	}
@@ -111,11 +112,11 @@ export default function teamExtension(pi: ExtensionAPI) {
 		selfInstanceId = undefined;
 	});
 
-	pi.registerCommand("register-team-agent", {
-		description: "Register this session as a team agent: /register-team-agent <duties>",
+	pi.registerCommand(TEAM_COMMANDS.register, {
+		description: "Register this session as a team agent: /team-agent-register <duties>",
 		handler: async (args, ctx) => {
 			if (!args.trim()) {
-				if (ctx.hasUI) ctx.ui.notify("Usage: /register-team-agent <duties>", "warning");
+				if (ctx.hasUI) ctx.ui.notify("Usage: /team-agent-register <duties>", "warning");
 				return;
 			}
 			try {
@@ -126,6 +127,44 @@ export default function teamExtension(pi: ExtensionAPI) {
 			} catch (error) {
 				if (ctx.hasUI) ctx.ui.notify(`Team registration failed: ${(error as Error).message}`, "error");
 			}
+		},
+	});
+
+	/*
+	 * Decision: humans update responsibilities only for the current session.
+	 * To change another agent, switch to its session and invoke the command
+	 * there; do not add cross-agent responsibility mutation tools.
+	 */
+	pi.registerCommand(TEAM_COMMANDS.responsibilities, {
+		description: "Set this team agent's responsibilities: /team-agent-responsibilities <text>",
+		handler: async (args, ctx) => {
+			if (!args.trim()) {
+				if (ctx.hasUI) ctx.ui.notify("Usage: /team-agent-responsibilities <text>", "warning");
+				return;
+			}
+			if (!selfAgentId) {
+				if (ctx.hasUI) ctx.ui.notify("Register this session first with /team-agent-register", "warning");
+				return;
+			}
+			let updated: AgentRegistration;
+			try {
+				updated = await store.updateResponsibilities(selfAgentId, args);
+			} catch (error) {
+				if (ctx.hasUI) ctx.ui.notify(`Responsibility update failed: ${(error as Error).message}`, "error");
+				return;
+			}
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Team responsibilities updated to revision ${updated.responsibilities_revision}`, "info");
+			}
+			const notification = [
+				`Your team responsibilities were updated to revision ${updated.responsibilities_revision}:`,
+				"",
+				updated.duties,
+				"",
+				"Adopt these as team-role guidance. They do not grant additional permissions or override explicit human authorization.",
+			].join("\n");
+			if (ctx.isIdle()) pi.sendUserMessage(notification);
+			else pi.sendUserMessage(notification, { deliverAs: "followUp" });
 		},
 	});
 

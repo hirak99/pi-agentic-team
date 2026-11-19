@@ -60,6 +60,24 @@ test("reactivation preserves agent UUID and rotates instance UUID", async (t) =>
 	assert.equal(reactivated.deleted_at, undefined);
 });
 
+test("responsibility updates are revisioned without changing identity", async (t) => {
+	const store = await withStore(t);
+	const original = await store.register(makeInput());
+	assert.equal(original.responsibilities_revision, 1);
+
+	const updated = await store.updateResponsibilities(original.agent_id, "Review pull requests and run checks");
+	assert.equal(updated.agent_id, original.agent_id);
+	assert.equal(updated.instance_id, original.instance_id);
+	assert.equal(updated.duties, "Review pull requests and run checks");
+	assert.equal(updated.responsibilities_revision, 2);
+	assert.equal(typeof updated.responsibilities_updated_at, "string");
+
+	await assert.rejects(() => store.updateResponsibilities(original.agent_id, "   "), /must not be empty/);
+	const fetched = await store.getAgent(original.agent_id);
+	assert.equal(fetched.responsibilities_revision, 2);
+	assert.equal(fetched.duties, updated.duties);
+});
+
 test("deactivation requires the matching instance UUID", async (t) => {
 	const store = await withStore(t);
 	const registration = await store.register(makeInput());

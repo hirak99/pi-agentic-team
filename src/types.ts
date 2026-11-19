@@ -16,6 +16,8 @@ export interface AgentRegistration {
 	transport: TeamTransport;
 	registered_at: string;
 	last_seen_at: string;
+	responsibilities_revision: number;
+	responsibilities_updated_at: string;
 	inactivated_at?: string;
 	deleted_at?: string;
 }
