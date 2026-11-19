@@ -1,0 +1,167 @@
+# pi-agentic-team
+
+A Pi extension for filesystem-backed team registration, direct messages, and
+Slack-like asynchronous channels.
+
+**Status:** early MVP. Files are the durable protocol. Tmux is currently the
+only automatic wake-up transport; channel messages are read on demand.
+
+## Features
+
+- Persistent team agent UUIDs, independent of Pi session IDs
+- Per-process instance UUIDs for safe lifecycle updates
+- `/register-team-agent` command and agent-initiated registration tool
+- Self-UUID and full self-registration tools
+- Agent discovery with live/stale status
+- Safe member deletion by archival, preserving message history
+- Direct inboxes with durable Markdown messages and acknowledgements
+- Tmux wake-up prompts containing only message IDs, not message bodies
+- Asynchronous channel messages using one file per message
+- Atomic file writes and cross-process registry locks
+
+## Installation
+
+Try the extension for one invocation:
+
+```bash
+pi -e /home/arnab/git/pi-agentic-team
+```
+
+Or install the local package into Pi's personal settings:
+
+```bash
+pi install /home/arnab/git/pi-agentic-team
+```
+
+Review and trust the source before installation. Like every Pi extension, it runs
+with the same operating-system permissions as Pi.
+
+By default, team state is stored in:
+
+```text
+~/.pi/agentic-team/
+```
+
+Set `PI_TEAM_DIR` when launching Pi to use a different shared directory. All
+agents on a team must use the same directory.
+
+## Register the current session
+
+As the human:
+
+```text
+/register-team-agent Review repository changes and run the test suite.
+```
+
+Or ask the current agent to register itself. It can call:
+
+```text
+team_register(duties="...", name="optional-name")
+```
+
+Registration captures the Pi session ID, CWD, process ID, and tmux pane when
+available. The registration identity is persisted in the Pi session, so a clean
+reload or resume restores the same team UUID with a fresh instance UUID.
+
+A session outside tmux can still register and use files and channels, but direct
+messages to it return `wake_status: "unavailable"` until another transport is
+implemented.
+
+## Agent tools
+
+| Tool | Purpose |
+| --- | --- |
+| `team_register` | Register or reactivate the current session |
+| `team_get_self_uuid` | Return this agent's persistent team UUID |
+| `team_get_self` | Return full identity, registration, transport, and liveness |
+| `team_list_agents` | Discover active agents; optionally include inactive/archived entries |
+| `team_send_message` | Persist a direct message and wake an active recipient |
+| `team_read_messages` | Read the current inbox or channel history |
+| `team_acknowledge` | Acknowledge a processed direct message |
+| `team_post_channel` | Post an asynchronous channel message |
+| `team_delete_member` | Archive a registration without deleting message history |
+
+### Direct messages
+
+A sender calls `team_send_message` with the recipient's team UUID and text. The
+extension first verifies that the recipient is active and live. It then writes
+the message atomically and, for tmux recipients, injects a short wake-up prompt:
+
+```text
+Team message <message-id> ... is waiting in your inbox.
+```
+
+The recipient uses `team_read_messages(message_id=...)` to read the full body and
+`team_acknowledge(message_id=...)` after processing it. A tmux failure leaves the
+message persisted and returns an explicit `wake_status: "failed"` error.
+
+### Channels
+
+Use lowercase channel slugs containing letters, digits, hyphens, or underscores:
+
+```text
+team_post_channel(channel="engineering", text="Status update")
+team_read_messages(channel="engineering", limit=20)
+```
+
+Channels do not wake subscribers in this MVP. This avoids waking every agent for
+every message and creating unintended model usage or feedback loops.
+
+### Deleting a member
+
+Inactive members can be deleted directly. Deleting an active member requires
+`confirm=true`. Deletion:
+
+- Moves the registration to `agents/archived/`
+- Clears its transport
+- Preserves channel history
+- Preserves the inbox
+- Does not terminate the member's Pi process
+
+## Storage layout
+
+```text
+team/
+├── agents/
+│   ├── <agent-uuid>.json
+│   └── archived/
+│       └── <agent-uuid>.json
+├── inboxes/
+│   └── <agent-uuid>/
+│       ├── <message-uuid>.md
+│       └── <message-uuid>.md.ack.json
+└── comm_channels/
+    └── <channel-name>/
+        └── YYYY/MM/DD/
+            └── <timestamp>_<message-uuid>.md
+```
+
+Messages are Markdown files with YAML-compatible frontmatter. Channel filenames
+include UTC timestamps and UUIDs to avoid same-second collisions.
+
+Shutdown deactivation is compare-and-swap on both agent UUID and instance UUID,
+so an old process cannot deactivate a newer instance. Clean shutdown is covered
+by Pi's `session_shutdown` lifecycle event; crashes are reported as stale by
+liveness checks.
+
+## Development
+
+Requirements: Node.js 22 or later, npm, and tmux for automatic direct wake-ups.
+
+```bash
+npm install
+npm run check
+```
+
+The checks run strict TypeScript checking and Node's built-in test runner.
+Extensions are loaded through Pi's TypeScript runtime, so no build step is
+required.
+
+## Current limitations
+
+- No extension-managed local socket or direct RPC wake-up transport yet
+- No channel subscriptions, mentions, or automatic channel wake-ups
+- No heartbeat writer; liveness is checked on demand
+- No remote hosts or cross-machine transport
+- Registry and messages are trusted local files, not an authentication boundary
+- Agent messages do not grant additional permissions or deployment authority
