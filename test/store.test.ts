@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 
 import { TeamStore } from "../src/store.ts";
@@ -130,7 +131,7 @@ test("active deletion requires confirmation and archives while keeping message h
 	assert.equal(channel[0]!.metadata.id, channelPost.metadata.id);
 });
 
-test("direct messages persist, are readable, and can be acknowledged", async (t) => {
+test("direct messages persist and record automatic-style read receipts", async (t) => {
 	const store = await withStore(t);
 	const from = randomUUID();
 	const to = randomUUID();
@@ -140,14 +141,14 @@ test("direct messages persist, are readable, and can be acknowledged", async (t)
 	assert.equal(sent.metadata.to, to);
 	assert.equal(sent.metadata.channel, null);
 	assert.equal(sent.body, "first message\n");
-	assert.equal(sent.acknowledged, false);
+	assert.equal(sent.read_at, null);
 
 	// Read the full inbox.
 	const inbox = await store.readInbox(to);
 	assert.equal(inbox.length, 1);
 	assert.equal(inbox[0]!.metadata.id, sent.metadata.id);
 	assert.equal(inbox[0]!.body, "first message\n");
-	assert.equal(inbox[0]!.acknowledged, false);
+	assert.equal(inbox[0]!.read_at, null);
 
 	// The sender's inbox is unaffected.
 	assert.deepEqual(await store.readInbox(from), []);
@@ -156,17 +157,25 @@ test("direct messages persist, are readable, and can be acknowledged", async (t)
 	const [single] = await store.readInbox(to, { messageId: sent.metadata.id });
 	assert.equal(single!.metadata.id, sent.metadata.id);
 
-	// Acknowledge only works for the addressed agent.
-	await assert.rejects(() => store.acknowledge(from, sent.metadata.id));
-	const receipt = await store.acknowledge(to, sent.metadata.id);
-	assert.equal(receipt.message_id, sent.metadata.id);
-	assert.equal(typeof receipt.acknowledged_at, "string");
+	const beforeRead = await store.getMessageStatus(from, sent.metadata.id);
+	assert.equal(beforeRead.read, false);
+	assert.equal(beforeRead.read_at, null);
 
-	// Acknowledged messages are excluded by default and included on request.
-	assert.deepEqual(await store.readInbox(to), []);
-	const including = await store.readInbox(to, { includeAcknowledged: true });
+	// Only the addressed recipient can mark a message read.
+	await assert.rejects(() => store.markRead(from, sent.metadata.id));
+	const receipt = await store.markRead(to, sent.metadata.id);
+	assert.equal(receipt.message_id, sent.metadata.id);
+	assert.equal(typeof receipt.read_at, "string");
+	assert.deepEqual(await store.markRead(to, sent.metadata.id), receipt);
+
+	// Reading never removes or hides message history.
+	const including = await store.readInbox(to);
 	assert.equal(including.length, 1);
-	assert.equal(including[0]!.acknowledged, true);
+	assert.equal(including[0]!.read_at, receipt.read_at);
+	const afterRead = await store.getMessageStatus(from, sent.metadata.id);
+	assert.equal(afterRead.read, true);
+	assert.equal(afterRead.read_at, receipt.read_at);
+	await assert.rejects(() => store.getMessageStatus(to, sent.metadata.id), /only the sender/);
 });
 
 test("channel posts persist and are readable", async (t) => {
@@ -213,7 +222,7 @@ test("invalid channel names are rejected", async (t) => {
 	}
 });
 
-test("unread filtering and limit validation", async (t) => {
+test("read receipts preserve inbox history and limit validation", async (t) => {
 	const store = await withStore(t);
 	const from = randomUUID();
 	const to = randomUUID();
@@ -222,15 +231,12 @@ test("unread filtering and limit validation", async (t) => {
 	await store.sendDirect({ from, to, body: "two" });
 	await store.sendDirect({ from, to, body: "three" });
 
-	// Default read returns all three unacknowledged messages.
+	// Reading does not filter or remove messages from inbox history.
 	assert.equal((await store.readInbox(to)).length, 3);
-
-	// After acknowledging one message, only the unacknowledged remain by default.
-	await store.acknowledge(to, first.metadata.id);
-	const unread = await store.readInbox(to);
-	assert.equal(unread.length, 2);
-	assert.ok(unread.every((message) => message.metadata.id !== first.metadata.id));
-	assert.equal((await store.readInbox(to, { includeAcknowledged: true })).length, 3);
+	await store.markRead(to, first.metadata.id);
+	const history = await store.readInbox(to);
+	assert.equal(history.length, 3);
+	assert.equal(history.find((message) => message.metadata.id === first.metadata.id)?.read_at !== null, true);
 
 	// Limit restricts the number of returned messages.
 	assert.equal((await store.readInbox(to, { limit: 1 })).length, 1);
@@ -254,4 +260,32 @@ test("unread filtering and limit validation", async (t) => {
 	// Boundary limits are accepted.
 	await store.readInbox(to, { limit: 1 });
 	await store.readInbox(to, { limit: 200 });
+});
+
+test("delivery locks serialize concurrent writers to one recipient", async (t) => {
+	const store = await withStore(t);
+	const recipient = randomUUID();
+	let active = 0;
+	let maximumActive = 0;
+	let completed = 0;
+
+	await Promise.all([
+		store.withDeliveryLock(recipient, async () => {
+			active += 1;
+			maximumActive = Math.max(maximumActive, active);
+			await delay(20);
+			completed += 1;
+			active -= 1;
+		}),
+		store.withDeliveryLock(recipient, async () => {
+			active += 1;
+			maximumActive = Math.max(maximumActive, active);
+			await delay(20);
+			completed += 1;
+			active -= 1;
+		}),
+	]);
+
+	assert.equal(completed, 2);
+	assert.equal(maximumActive, 1);
 });

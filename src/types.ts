@@ -44,7 +44,13 @@ export interface TeamMessage {
 	metadata: TeamMessageMetadata;
 	body: string;
 	path: string;
-	acknowledged: boolean;
+	read_at: string | null;
+}
+
+export interface ReadReceipt {
+	message_id: string;
+	agent_id: string;
+	read_at: string;
 }
 
 export interface WriteMessageInput {
@@ -59,7 +65,6 @@ export interface ReadMessageOptions {
 	messageId?: string | undefined;
 	since?: string | undefined;
 	limit?: number | undefined;
-	includeAcknowledged?: boolean | undefined;
 }
 
 export interface StoredSessionIdentity {

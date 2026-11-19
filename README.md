@@ -15,8 +15,8 @@ only automatic wake-up transport; channel messages are read on demand.
 - Self-UUID and full self-registration tools
 - Agent discovery with live/stale status
 - Safe member deletion by archival, preserving message history
-- Direct inboxes with durable Markdown messages and acknowledgements
-- Tmux wake-up prompts containing only message IDs, not message bodies
+- Direct inboxes with durable Markdown messages and automatic read receipts
+- Inline-by-default tmux delivery, with reference delivery for sensitive content
 - Asynchronous channel messages using one file per message
 - Atomic file writes and cross-process registry locks
 
@@ -89,23 +89,35 @@ implemented.
 | `team_get_self` | Return full identity, registration, transport, and liveness |
 | `team_list_agents` | Discover active agents; optionally include inactive/archived entries |
 | `team_send_message` | Persist a direct message and wake an active recipient |
-| `team_read_messages` | Read the current inbox or channel history |
-| `team_acknowledge` | Acknowledge a processed direct message |
+| `team_read_messages` | Read the current inbox or channel history; inbox reads record receipts |
+| `team_message_status` | Optionally check the read status of a message sent by this agent |
 | `team_post_channel` | Post an asynchronous channel message |
 | `team_delete_member` | Archive a registration without deleting message history |
 
 ### Direct messages
 
 A sender calls `team_send_message` with the recipient's team UUID and text. The
-extension first verifies that the recipient is active and live. It then writes
-the message atomically and, for tmux recipients, injects a short wake-up prompt:
+extension first verifies that the recipient is active and live, then writes the
+message atomically. Delivery defaults to `inline`, so the wake-up includes the
+sender UUID, message UUID, and complete body:
 
 ```text
-Team message <message-id> ... is waiting in your inbox.
+Team message from Sender (<sender-uuid>), message <message-uuid>:
+
+Please review the PR and reply when it is merged.
 ```
 
-The recipient uses `team_read_messages(message_id=...)` to read the full body and
-`team_acknowledge(message_id=...)` after processing it. A tmux failure leaves the
+The recipient can process the message immediately and respond with a normal
+`team_send_message` when requested. No separate acknowledgement is required.
+
+For sensitive content, use `delivery="reference"`. The wake-up then contains
+only sender and message metadata; the recipient uses
+`team_read_messages(message_id=...)` to retrieve the body.
+
+Inline messages record a read receipt when the receiving extension accepts the
+input. Reference messages record one when the recipient reads the inbox. The
+sender can optionally inspect `team_message_status(message_id=...)`; receipts do
+not wake the sender or start another model turn. A tmux failure leaves the
 message persisted and returns an explicit `wake_status: "failed"` error.
 
 ### Channels
@@ -142,7 +154,7 @@ team/
 ├── inboxes/
 │   └── <agent-uuid>/
 │       ├── <message-uuid>.md
-│       └── <message-uuid>.md.ack.json
+│       └── <message-uuid>.md.read.json
 └── comm_channels/
     └── <channel-name>/
         └── YYYY/MM/DD/

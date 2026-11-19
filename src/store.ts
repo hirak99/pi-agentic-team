@@ -9,6 +9,7 @@ import type {
 	RegistrationInput,
 	TeamMessage,
 	TeamMessageMetadata,
+	ReadReceipt,
 	WriteMessageInput,
 } from "./types.ts";
 
@@ -106,7 +107,7 @@ function messageMarkdown(metadata: TeamMessageMetadata, body: string): string {
 	].join("\n");
 }
 
-function parseMessage(path: string, raw: string, acknowledged: boolean): TeamMessage {
+function parseMessage(path: string, raw: string, readAt: string | null): TeamMessage {
 	const match = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(raw);
 	if (!match?.[1] || match[2] === undefined) throw new Error(`invalid message format: ${path}`);
 	const values: Record<string, unknown> = {};
@@ -119,13 +120,12 @@ function parseMessage(path: string, raw: string, acknowledged: boolean): TeamMes
 	if (!metadata.id || !metadata.from || !metadata.created_at) {
 		throw new Error(`incomplete message metadata: ${path}`);
 	}
-	return { metadata, body: match[2], path, acknowledged };
+	return { metadata, body: match[2], path, read_at: readAt };
 }
 
 function normalizeReadOptions(options: ReadMessageOptions): {
 	since: number | undefined;
 	limit: number;
-	includeAcknowledged: boolean;
 } {
 	let since: number | undefined;
 	if (options.since !== undefined) {
@@ -136,13 +136,12 @@ function normalizeReadOptions(options: ReadMessageOptions): {
 	if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
 		throw new Error("limit must be an integer from 1 to 200");
 	}
-	return { since, limit, includeAcknowledged: options.includeAcknowledged ?? false };
+	return { since, limit };
 }
 
 function filterAndLimit(messages: TeamMessage[], options: ReadMessageOptions): TeamMessage[] {
 	const normalized = normalizeReadOptions(options);
 	return messages
-		.filter((message) => normalized.includeAcknowledged || !message.acknowledged)
 		.filter((message) => normalized.since === undefined || Date.parse(message.metadata.created_at) > normalized.since)
 		.sort((a, b) => a.metadata.created_at.localeCompare(b.metadata.created_at) || a.metadata.id.localeCompare(b.metadata.id))
 		.slice(-normalized.limit);
@@ -153,6 +152,11 @@ export class TeamStore {
 
 	constructor(root: string) {
 		this.root = resolve(root);
+	}
+
+	async withDeliveryLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
+		requireUuid(agentId, "agent_id");
+		return withRegistryLock(join(this.root, "locks", "deliveries", agentId), operation);
 	}
 
 	private agentPath(agentId: string): string {
@@ -308,7 +312,7 @@ export class TeamStore {
 	private async writeMessage(input: WriteMessageInput, metadata: TeamMessageMetadata, path: string): Promise<TeamMessage> {
 		requireText(input.body, "message", 100_000);
 		await writeAtomic(path, messageMarkdown(metadata, input.body));
-		return { metadata, body: `${input.body}\n`, path, acknowledged: false };
+		return { metadata, body: `${input.body}\n`, path, read_at: null };
 	}
 
 	async sendDirect(input: WriteMessageInput & { to: string }): Promise<TeamMessage> {
@@ -346,8 +350,11 @@ export class TeamStore {
 	}
 
 	private async readMessage(path: string): Promise<TeamMessage> {
-		const acknowledged = await exists(`${path}.ack.json`);
-		return parseMessage(path, await readFile(path, "utf8"), acknowledged);
+		const receiptPath = `${path}.read.json`;
+		const readAt = (await exists(receiptPath))
+			? (await readJson<ReadReceipt>(receiptPath)).read_at
+			: null;
+		return parseMessage(path, await readFile(path, "utf8"), readAt);
 	}
 
 	async readInbox(agentId: string, options: ReadMessageOptions = {}): Promise<TeamMessage[]> {
@@ -376,15 +383,43 @@ export class TeamStore {
 			if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
 			messages.push(await this.readMessage(join(entry.parentPath, entry.name)));
 		}
-		return filterAndLimit(messages, { ...options, includeAcknowledged: true });
+		return filterAndLimit(messages, options);
 	}
 
-	async acknowledge(agentId: string, messageId: string): Promise<{ message_id: string; acknowledged_at: string }> {
+	async markRead(agentId: string, messageId: string): Promise<ReadReceipt> {
 		requireUuid(messageId, "message_id");
 		const [message] = await this.readInbox(agentId, { messageId });
 		if (!message || message.metadata.to !== agentId) throw new Error("message is not in this agent's inbox");
-		const receipt = { message_id: messageId, agent_id: agentId, acknowledged_at: new Date().toISOString() };
-		await writeJsonAtomic(`${message.path}.ack.json`, receipt);
-		return { message_id: messageId, acknowledged_at: receipt.acknowledged_at };
+		const receiptPath = `${message.path}.read.json`;
+		if (await exists(receiptPath)) return readJson<ReadReceipt>(receiptPath);
+		const receipt: ReadReceipt = { message_id: messageId, agent_id: agentId, read_at: new Date().toISOString() };
+		await writeJsonAtomic(receiptPath, receipt);
+		return receipt;
+	}
+
+	async getMessageStatus(requesterId: string, messageId: string) {
+		requireUuid(requesterId, "requester_id");
+		requireUuid(messageId, "message_id");
+		const inboxRoot = join(this.root, "inboxes");
+		if (await exists(inboxRoot)) {
+			for (const entry of await readdir(inboxRoot, { withFileTypes: true })) {
+				if (!entry.isDirectory()) continue;
+				const path = join(inboxRoot, entry.name, `${messageId}.md`);
+				if (!(await exists(path))) continue;
+				const message = await this.readMessage(path);
+				if (message.metadata.from !== requesterId) {
+					throw new Error("only the sender can inspect this message's read status");
+				}
+				return {
+					message_id: messageId,
+					from: message.metadata.from,
+					to: message.metadata.to,
+					created_at: message.metadata.created_at,
+					read: message.read_at !== null,
+					read_at: message.read_at,
+				};
+			}
+		}
+		throw new Error("message not found");
 	}
 }

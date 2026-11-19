@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 
 import { TEAM_COMMANDS } from "./commands.ts";
+import { formatInlineMessage, parseInlineMessageId } from "./message-format.ts";
 import { TeamStore } from "./store.ts";
 import { detectTmuxTransport, tmuxPaneExists, wakeTmuxAgent } from "./tmux.ts";
 import type { AgentRegistration, RegistrationInput, TeamMessage } from "./types.ts";
@@ -27,7 +28,7 @@ function messageResult(message: TeamMessage) {
 		channel: message.metadata.channel,
 		created_at: message.metadata.created_at,
 		reply_to: message.metadata.reply_to,
-		acknowledged: message.acknowledged,
+		read_at: message.read_at,
 		body: message.body,
 	};
 }
@@ -111,6 +112,17 @@ export default function teamExtension(pi: ExtensionAPI) {
 		if (selfAgentId && selfInstanceId) await store.deactivate(selfAgentId, selfInstanceId);
 		selfAgentId = undefined;
 		selfInstanceId = undefined;
+	});
+
+	pi.on("input", async (event) => {
+		if (!selfAgentId) return;
+		const messageId = parseInlineMessageId(event.text);
+		if (!messageId) return;
+		try {
+			await store.markRead(selfAgentId, messageId);
+		} catch {
+			// A receipt failure must never block delivery of the actual message.
+		}
 	});
 
 	pi.registerCommand(TEAM_COMMANDS.register, {
@@ -249,12 +261,15 @@ export default function teamExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_send_message",
 		label: "Send team message",
-		description: "Persist a direct message in another active team agent's inbox and wake it through its registered transport.",
+		description: "Persist a direct message for another active team agent and wake it. Defaults to inline delivery; use reference delivery for sensitive content.",
 		promptSnippet: "Send a durable direct message to another team agent",
 		parameters: Type.Object({
 			to: Type.String({ description: "Recipient team agent UUID" }),
 			text: Type.String({ description: "Message body" }),
 			reply_to: Type.Optional(Type.String({ description: "Optional message UUID being replied to" })),
+			delivery: Type.Optional(Type.Union([Type.Literal("inline"), Type.Literal("reference")], {
+				description: "inline includes the body in the wake-up; reference sends only metadata and requires an inbox read (default inline)",
+			})),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const sender = await store.getAgent(requireSelf());
@@ -268,15 +283,18 @@ export default function teamExtension(pi: ExtensionAPI) {
 				body: params.text,
 				replyTo: params.reply_to,
 			});
-			if (recipient.transport.type === "none") {
+			const transport = recipient.transport;
+			if (transport.type === "none") {
 				return toolResult({ message_id: message.metadata.id, persisted: true, wake_status: "unavailable" });
 			}
-			const prompt = [
-				`Team message ${message.metadata.id} from ${sender.name} is waiting in your inbox.`,
-				"Use team_read_messages with message_id to read it, then team_acknowledge after processing.",
-			].join(" ");
+			const prompt = (params.delivery ?? "inline") === "inline"
+				? formatInlineMessage(sender.name, sender.agent_id, message.metadata.id, params.text)
+				: [
+						`Team message ${message.metadata.id} from ${sender.name} is waiting in your inbox.`,
+						"Use team_read_messages with message_id to read it.",
+					].join(" ");
 			try {
-				await wakeTmuxAgent(recipient.transport, prompt, signal);
+				await store.withDeliveryLock(recipient.agent_id, () => wakeTmuxAgent(transport, prompt, signal));
 				return toolResult({ message_id: message.metadata.id, persisted: true, wake_status: "sent" });
 			} catch (error) {
 				return toolResult(
@@ -310,39 +328,41 @@ export default function teamExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_read_messages",
 		label: "Read team messages",
-		description: "Read this agent's inbox or a named channel. Inbox reads default to unacknowledged messages; channel reads return recent history.",
+		description: "Read this agent's inbox or a named channel. Reading direct messages automatically records read receipts.",
 		promptSnippet: "Read direct team messages or channel history",
 		parameters: Type.Object({
 			channel: Type.Optional(Type.String({ description: "Read this channel instead of the inbox" })),
 			message_id: Type.Optional(Type.String({ description: "Read one direct message from this agent's inbox" })),
 			since: Type.Optional(Type.String({ description: "Return messages after this ISO timestamp" })),
 			limit: Type.Optional(Type.Number({ description: "Maximum messages, from 1 to 200; default 50" })),
-			include_acknowledged: Type.Optional(Type.Boolean({ description: "Include acknowledged inbox messages" })),
 		}),
 		async execute(_toolCallId, params) {
 			if (params.channel && params.message_id) throw new Error("message_id cannot be combined with channel");
-			const options = {
-				since: params.since,
-				limit: params.limit,
-				includeAcknowledged: params.include_acknowledged,
-				messageId: params.message_id,
-			};
-			const messages = params.channel
-				? await store.readChannel(params.channel, options)
-				: await store.readInbox(requireSelf(), options);
-			return toolResult({ messages: messages.map(messageResult) });
+			const options = { since: params.since, limit: params.limit, messageId: params.message_id };
+			if (params.channel) {
+				const messages = await store.readChannel(params.channel, options);
+				return toolResult({ messages: messages.map(messageResult) });
+			}
+			const self = requireSelf();
+			const messages = await store.readInbox(self, options);
+			const rendered = [];
+			for (const message of messages) {
+				const receipt = await store.markRead(self, message.metadata.id);
+				rendered.push(messageResult({ ...message, read_at: receipt.read_at }));
+			}
+			return toolResult({ messages: rendered });
 		},
 	});
 
 	pi.registerTool({
-		name: "team_acknowledge",
-		label: "Acknowledge team message",
-		description: "Mark one direct message in this agent's inbox as acknowledged after processing it.",
+		name: "team_message_status",
+		label: "Check team message read status",
+		description: "Optionally check whether a direct message sent by this agent has been read. Does not notify or wake anyone.",
 		parameters: Type.Object({
-			message_id: Type.String({ description: "Direct message UUID" }),
+			message_id: Type.String({ description: "Direct message UUID returned by team_send_message" }),
 		}),
 		async execute(_toolCallId, params) {
-			return toolResult(await store.acknowledge(requireSelf(), params.message_id));
+			return toolResult(await store.getMessageStatus(requireSelf(), params.message_id));
 		},
 	});
 }
