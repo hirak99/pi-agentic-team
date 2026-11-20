@@ -17,22 +17,35 @@ messages are read on demand.
 - Agent discovery with live/stale status
 - Safe member deletion by archival, preserving message history
 - Direct inboxes with durable Markdown messages and automatic read receipts
-- Inline-by-default tmux delivery, with reference delivery for sensitive content
+- Inline-by-default native delivery, with reference delivery for sensitive content
+- Direct delivery never writes to or submits the interactive editor buffer
 - Asynchronous channel messages using one file per message
 - Atomic file writes and cross-process registry locks
 
 ## Installation
 
-Try the extension for one invocation:
+Install from GitHub:
 
 ```bash
-pi -e /home/arnab/git/pi-agentic-team
+pi install git:github.com/hirak99/pi-agentic-team
 ```
 
-Or install the local package into Pi's personal settings:
+To pin the `main` branch explicitly:
 
 ```bash
-pi install /home/arnab/git/pi-agentic-team
+pi install git:github.com/hirak99/pi-agentic-team@main
+```
+
+Or install a local clone:
+
+```bash
+pi install /path/to/pi-agentic-team
+```
+
+Try the extension for one invocation without installing:
+
+```bash
+pi -e /path/to/pi-agentic-team
 ```
 
 Review and trust the source before installation. Like every Pi extension, it runs
