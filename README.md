@@ -1,5 +1,10 @@
 # pi-agentic-team
 
+> **Superseded standalone repository:** Active development and installation have
+> moved to [`hirak99/pi-arnab-extensions`](https://github.com/hirak99/pi-arnab-extensions)
+> under [`packages/agentic-team`](https://github.com/hirak99/pi-arnab-extensions/tree/main/packages/agentic-team).
+> This repository is retained for its standalone history.
+
 A Pi extension for filesystem-backed team registration, direct messages, and
 Slack-like asynchronous channels.
 
