@@ -5,9 +5,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 
 import { TEAM_COMMANDS } from "./commands.ts";
-import { formatInlineMessage, parseInlineMessageId } from "./message-format.ts";
+import { InboxDelivery } from "./inbox-delivery.ts";
+import { parseInlineMessageId } from "./message-format.ts";
 import { TeamStore } from "./store.ts";
-import { detectTmuxTransport, tmuxPaneExists, wakeTmuxAgent } from "./tmux.ts";
+import { detectTmuxTransport, tmuxPaneExists } from "./tmux.ts";
 import type { AgentRegistration, RegistrationInput, TeamMessage } from "./types.ts";
 
 const REGISTRATION_ENTRY = "pi-agentic-team-registration";
@@ -37,6 +38,22 @@ export default function teamExtension(pi: ExtensionAPI) {
 	const store = new TeamStore(process.env.PI_TEAM_DIR ?? join(homedir(), ".pi", "agentic-team"));
 	let selfAgentId: string | undefined;
 	let selfInstanceId: string | undefined;
+	let inboxDelivery: InboxDelivery | undefined;
+
+	async function startInboxDelivery(ctx: ExtensionContext): Promise<void> {
+		const agentId = requireSelf();
+		inboxDelivery = new InboxDelivery(
+			store,
+			(prompt) => {
+				if (ctx.isIdle()) pi.sendUserMessage(prompt);
+				else pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+			},
+			(error) => {
+				if (ctx.hasUI) ctx.ui.notify(`Team inbox delivery error: ${error.message}`, "error");
+			},
+		);
+		await inboxDelivery.start(agentId);
+	}
 
 	function registrationInput(ctx: ExtensionContext, duties: string, name?: string): RegistrationInput {
 		return {
@@ -54,6 +71,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 		selfAgentId = registration.agent_id;
 		selfInstanceId = registration.instance_id;
 		pi.appendEntry(REGISTRATION_ENTRY, { agent_id: registration.agent_id });
+		await startInboxDelivery(ctx);
 		return registration;
 	}
 
@@ -86,6 +104,8 @@ export default function teamExtension(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		await inboxDelivery?.stop();
+		inboxDelivery = undefined;
 		selfAgentId = undefined;
 		selfInstanceId = undefined;
 		let restoredId: string | undefined;
@@ -103,12 +123,15 @@ export default function teamExtension(pi: ExtensionAPI) {
 			const restored = await store.register(registrationInput(ctx, current.duties, current.name), restoredId);
 			selfAgentId = restored.agent_id;
 			selfInstanceId = restored.instance_id;
+			await startInboxDelivery(ctx);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
 	});
 
 	pi.on("session_shutdown", async () => {
+		await inboxDelivery?.stop();
+		inboxDelivery = undefined;
 		if (selfAgentId && selfInstanceId) await store.deactivate(selfAgentId, selfInstanceId);
 		selfAgentId = undefined;
 		selfInstanceId = undefined;
@@ -250,6 +273,8 @@ export default function teamExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params) {
 			const deleted = await store.deleteAgent(params.agent_id, params.confirm ?? false);
 			if (selfAgentId === params.agent_id) {
+				await inboxDelivery?.stop();
+				inboxDelivery = undefined;
 				selfAgentId = undefined;
 				selfInstanceId = undefined;
 				pi.appendEntry(REGISTRATION_ENTRY, { agent_id: null });
@@ -261,7 +286,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "team_send_message",
 		label: "Send team message",
-		description: "Persist a direct message for another active team agent and wake it. Defaults to inline delivery; use reference delivery for sensitive content.",
+		description: "Persist a direct message for another active team agent and queue native in-process delivery without touching terminal input. Defaults to inline delivery; use reference delivery for sensitive content.",
 		promptSnippet: "Send a durable direct message to another team agent",
 		parameters: Type.Object({
 			to: Type.String({ description: "Recipient team agent UUID" }),
@@ -271,7 +296,7 @@ export default function teamExtension(pi: ExtensionAPI) {
 				description: "inline includes the body in the wake-up; reference sends only metadata and requires an inbox read (default inline)",
 			})),
 		}),
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, _signal) {
 			const sender = await store.getAgent(requireSelf());
 			const recipient = await store.getAgent(params.to);
 			if (recipient.status !== "active" || !(await isLive(recipient))) {
@@ -282,26 +307,9 @@ export default function teamExtension(pi: ExtensionAPI) {
 				to: recipient.agent_id,
 				body: params.text,
 				replyTo: params.reply_to,
+				delivery: params.delivery ?? "inline",
 			});
-			const transport = recipient.transport;
-			if (transport.type === "none") {
-				return toolResult({ message_id: message.metadata.id, persisted: true, wake_status: "unavailable" });
-			}
-			const prompt = (params.delivery ?? "inline") === "inline"
-				? formatInlineMessage(sender.name, sender.agent_id, message.metadata.id, params.text)
-				: [
-						`Team message ${message.metadata.id} from ${sender.name} is waiting in your inbox.`,
-						"Use team_read_messages with message_id to read it.",
-					].join(" ");
-			try {
-				await store.withDeliveryLock(recipient.agent_id, () => wakeTmuxAgent(transport, prompt, signal));
-				return toolResult({ message_id: message.metadata.id, persisted: true, wake_status: "sent" });
-			} catch (error) {
-				return toolResult(
-					{ message_id: message.metadata.id, persisted: true, wake_status: "failed", error: (error as Error).message },
-					true,
-				);
-			}
+			return toolResult({ message_id: message.metadata.id, persisted: true, wake_status: "queued" });
 		},
 	});
 

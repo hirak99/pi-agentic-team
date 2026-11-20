@@ -101,6 +101,7 @@ function messageMarkdown(metadata: TeamMessageMetadata, body: string): string {
 		`channel: ${JSON.stringify(metadata.channel)}`,
 		`created_at: ${JSON.stringify(metadata.created_at)}`,
 		`reply_to: ${JSON.stringify(metadata.reply_to)}`,
+		...(metadata.delivery ? [`delivery: ${JSON.stringify(metadata.delivery)}`] : []),
 		"---",
 		body,
 		"",
@@ -319,6 +320,9 @@ export class TeamStore {
 		requireUuid(input.from, "from");
 		requireUuid(input.to, "to");
 		if (input.channel !== undefined) throw new Error("direct messages cannot specify a channel");
+		if (input.delivery !== undefined && input.delivery !== "inline" && input.delivery !== "reference") {
+			throw new Error("delivery must be inline or reference");
+		}
 		const metadata: TeamMessageMetadata = {
 			id: randomUUID(),
 			from: input.from,
@@ -326,6 +330,7 @@ export class TeamStore {
 			channel: null,
 			created_at: new Date().toISOString(),
 			reply_to: input.replyTo ?? null,
+			delivery: input.delivery ?? "inline",
 		};
 		return this.writeMessage(input, metadata, join(this.root, "inboxes", input.to, `${metadata.id}.md`));
 	}

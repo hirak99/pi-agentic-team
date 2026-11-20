@@ -3,8 +3,9 @@
 A Pi extension for filesystem-backed team registration, direct messages, and
 Slack-like asynchronous channels.
 
-**Status:** early MVP. Files are the durable protocol. Tmux is currently the
-only automatic wake-up transport; channel messages are read on demand.
+**Status:** early MVP. Files are the durable protocol. An in-process inbox
+watcher delivers direct messages through Pi's native messaging API; channel
+messages are read on demand.
 
 ## Features
 
@@ -61,8 +62,9 @@ team_register(duties="...", name="optional-name")
 ```
 
 Registration captures the Pi session ID, CWD, process ID, and tmux pane when
-available. The registration identity is persisted in the Pi session, so a clean
-reload or resume restores the same team UUID with a fresh instance UUID.
+available. Tmux is used only for pane liveness checks, never for message input.
+The registration identity is persisted in the Pi session, so a clean reload or
+resume restores the same team UUID with a fresh instance UUID.
 
 ## Update current responsibilities
 
@@ -76,9 +78,8 @@ running agent as a user message or follow-up. Agents can inspect their own
 responsibilities with `team_get_self()` and other agents' responsibilities with
 `team_list_agents()`.
 
-A session outside tmux can still register and use files and channels, but direct
-messages to it return `wake_status: "unavailable"` until another transport is
-implemented.
+A session outside tmux can still register and receive native inbox delivery.
+Without a tmux pane, liveness relies on the registered process ID.
 
 ## Agent tools
 
@@ -88,7 +89,7 @@ implemented.
 | `team_get_self_uuid` | Return this agent's persistent team UUID |
 | `team_get_self` | Return full identity, registration, transport, and liveness |
 | `team_list_agents` | Discover active agents; optionally include inactive/archived entries |
-| `team_send_message` | Persist a direct message and wake an active recipient |
+| `team_send_message` | Persist a direct message and queue native recipient delivery |
 | `team_read_messages` | Read the current inbox or channel history; inbox reads record receipts |
 | `team_message_status` | Optionally check the read status of a message sent by this agent |
 | `team_post_channel` | Post an asynchronous channel message |
@@ -98,8 +99,14 @@ implemented.
 
 A sender calls `team_send_message` with the recipient's team UUID and text. The
 extension first verifies that the recipient is active and live, then writes the
-message atomically. Delivery defaults to `inline`, so the wake-up includes the
-sender UUID, message UUID, and complete body:
+message atomically and returns `wake_status: "queued"`. The recipient's
+in-process inbox watcher uses `pi.sendUserMessage()`; it never pastes into or
+presses Enter in the interactive editor, so an unfinished human draft is left
+untouched. If the agent is busy, Pi queues the message as a follow-up. Unread
+messages are also delivered when a registered session starts.
+
+Delivery defaults to `inline`, so the native message includes the sender UUID,
+message UUID, and complete body:
 
 ```text
 Team message from Sender (<sender-uuid>), message <message-uuid>:
@@ -110,15 +117,16 @@ Please review the PR and reply when it is merged.
 The recipient can process the message immediately and respond with a normal
 `team_send_message` when requested. No separate acknowledgement is required.
 
-For sensitive content, use `delivery="reference"`. The wake-up then contains
-only sender and message metadata; the recipient uses
+For sensitive content, use `delivery="reference"`. The native message then
+contains only sender and message metadata; the recipient uses
 `team_read_messages(message_id=...)` to retrieve the body.
 
 Inline messages record a read receipt when the receiving extension accepts the
 input. Reference messages record one when the recipient reads the inbox. The
 sender can optionally inspect `team_message_status(message_id=...)`; receipts do
-not wake the sender or start another model turn. A tmux failure leaves the
-message persisted and returns an explicit `wake_status: "failed"` error.
+not wake the sender or start another model turn. The message file remains the
+durable record if native delivery fails; the recipient reports watcher errors in
+its Pi UI.
 
 ### Channels
 
@@ -171,7 +179,8 @@ liveness checks.
 
 ## Development
 
-Requirements: Node.js 22 or later, npm, and tmux for automatic direct wake-ups.
+Requirements: Node.js 22 or later and npm. Tmux is optional and used only for
+pane liveness checks.
 
 ```bash
 npm install
@@ -184,7 +193,7 @@ required.
 
 ## Current limitations
 
-- No extension-managed local socket or direct RPC wake-up transport yet
+- Native inbox delivery requires the recipient's registered Pi process to be running
 - No channel subscriptions, mentions, or automatic channel wake-ups
 - No heartbeat writer; liveness is checked on demand
 - No remote hosts or cross-machine transport

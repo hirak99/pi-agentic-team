@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
 
 import type { TeamTransport } from "./types.ts";
 
@@ -44,29 +43,4 @@ export async function tmuxPaneExists(
 	} catch {
 		return false;
 	}
-}
-
-export async function wakeTmuxAgent(
-	transport: Extract<TeamTransport, { type: "tmux" }>,
-	prompt: string,
-	signal?: AbortSignal,
-): Promise<void> {
-	if (!(await tmuxPaneExists(transport, signal))) {
-		throw new Error(`tmux pane ${transport.pane} no longer exists`);
-	}
-	if (prompt.includes("\n")) {
-		const buffer = `pi-agentic-team-${randomUUID()}`;
-		try {
-			await runTmux([...tmuxPrefix(transport), "set-buffer", "-b", buffer, "--", prompt], signal);
-			await runTmux(
-				[...tmuxPrefix(transport), "paste-buffer", "-p", "-b", buffer, "-t", transport.pane],
-				signal,
-			);
-		} finally {
-			await runTmux([...tmuxPrefix(transport), "delete-buffer", "-b", buffer]).catch(() => undefined);
-		}
-	} else {
-		await runTmux([...tmuxPrefix(transport), "send-keys", "-t", transport.pane, "-l", prompt], signal);
-	}
-	await runTmux([...tmuxPrefix(transport), "send-keys", "-t", transport.pane, "Enter"], signal);
 }

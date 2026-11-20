@@ -31,6 +31,8 @@ export interface RegistrationInput {
 	transport: TeamTransport;
 }
 
+export type MessageDelivery = "inline" | "reference";
+
 export interface TeamMessageMetadata {
 	id: string;
 	from: string;
@@ -38,6 +40,7 @@ export interface TeamMessageMetadata {
 	channel: string | null;
 	created_at: string;
 	reply_to: string | null;
+	delivery?: MessageDelivery;
 }
 
 export interface TeamMessage {
@@ -59,6 +62,7 @@ export interface WriteMessageInput {
 	channel?: string | undefined;
 	body: string;
 	replyTo?: string | undefined;
+	delivery?: MessageDelivery | undefined;
 }
 
 export interface ReadMessageOptions {
